@@ -7,6 +7,7 @@ import seaborn as sns
 import multiprocessing as mp
 from scipy.stats import spearmanr
 from scipy.interpolate import interp1d
+from numba import njit
 
 class TransitionMatrixces():
     def __init__(self, num_buckets):
@@ -78,45 +79,6 @@ class TransitionMatrixces():
         transition_matrix = self.build_transition_matrix(buckets)
         return transition_matrix
 
-    def interpolate_to_length(self, array, target_length):
-        """
-        Interpolates a 1D NumPy array to match the target length.
-        """
-        x_old = np.linspace(0, 1, len(array))  # Original indices normalized
-        x_new = np.linspace(0, 1, target_length)  # New indices
-        interpolator = interp1d(x_old, array, kind='linear', fill_value='extrapolate')
-        return interpolator(x_new)
-
-    def calculate_asset_correlation(self, bucketed_assets):
-        """
-        Computes the Spearman correlation matrix, ensuring sequences are interpolated to match the longest one.
-
-        Args:
-            bucketed_assets (list of np.ndarray): List of bucketed sequences for different assets.
-
-        Returns:
-            np.ndarray: Correlation matrix (num_assets x num_assets).
-        """
-        num_assets = len(bucketed_assets)
-        
-        # Find the longest sequence length
-        max_length = max(len(arr) for arr in bucketed_assets)
-
-        # Interpolate all sequences to the longest length
-        aligned_assets = [self.interpolate_to_length(arr, max_length) for arr in bucketed_assets]
-
-        # Compute correlation matrix
-        correlation_matrix = np.zeros((num_assets, num_assets))
-
-        for i in range(num_assets):
-            for j in range(num_assets):
-                if i != j:
-                    correlation_matrix[i, j], _ = spearmanr(aligned_assets[i], aligned_assets[j])
-                else:
-                    correlation_matrix[i, j] = 1.0  # Self-correlation is always 1
-
-        return correlation_matrix
-    
     def generate_asset_correlation_matrix(self, li_data):
 
         li_buckets = []
@@ -205,6 +167,89 @@ def filter_data(array):
     else:
         return False
     
+@njit
+def linear_interpolation(x_old, y_old, x_new):
+    """Numba-compatible linear interpolation."""
+    y_new = np.empty_like(x_new)
+    n = len(x_old)
+
+    for i in range(len(x_new)):
+        if x_new[i] <= x_old[0]:  # Extrapolate left
+            y_new[i] = y_old[0]
+        elif x_new[i] >= x_old[-1]:  # Extrapolate right
+            y_new[i] = y_old[-1]
+        else:
+            # Binary search for the interval
+            low, high = 0, n - 1
+            while high - low > 1:
+                mid = (high + low) // 2
+                if x_old[mid] > x_new[i]:
+                    high = mid
+                else:
+                    low = mid
+            # Linear interpolation
+            x1, x2 = x_old[low], x_old[high]
+            y1, y2 = y_old[low], y_old[high]
+            y_new[i] = y1 + (y2 - y1) * (x_new[i] - x1) / (x2 - x1)
+    
+    return y_new
+
+@njit
+def interpolate_to_length(array, target_length):
+    """Interpolates a 1D array to match the target length using linear interpolation."""
+    x_old = np.linspace(0, 1, len(array))  # Original indices normalized
+    x_new = np.linspace(0, 1, target_length)  # New indices
+    return linear_interpolation(x_old, array, x_new)
+
+@njit
+def rank_data(arr):
+    """Computes ranks for Spearman correlation."""
+    sorted_indices = np.argsort(arr)
+    ranks = np.empty_like(sorted_indices, dtype=np.float64)
+    ranks[sorted_indices] = np.arange(len(arr)) + 1
+    return ranks
+
+@njit
+def spearman_correlation(x, y):
+    """Computes Spearman correlation for two 1D arrays."""
+    rx = rank_data(x)
+    ry = rank_data(y)
+    
+    # Compute Pearson correlation on ranks
+    mean_rx = np.mean(rx)
+    mean_ry = np.mean(ry)
+    
+    num = np.sum((rx - mean_rx) * (ry - mean_ry))
+    den_x = np.sqrt(np.sum((rx - mean_rx) ** 2))
+    den_y = np.sqrt(np.sum((ry - mean_ry) ** 2))
+    
+    return num / (den_x * den_y) if den_x > 0 and den_y > 0 else 0.0
+
+@njit
+def calculate_asset_correlation(bucketed_assets):
+    """Computes the Spearman correlation matrix using interpolated sequences."""
+    num_assets = len(bucketed_assets)
+
+    # Find the longest sequence length
+    max_length = max(len(arr) for arr in bucketed_assets)
+
+    # Interpolate all sequences to the longest length
+    aligned_assets = np.empty((num_assets, max_length))
+    for i in range(num_assets):
+        aligned_assets[i] = interpolate_to_length(bucketed_assets[i], max_length)
+
+    # Compute correlation matrix
+    correlation_matrix = np.zeros((num_assets, num_assets))
+
+    for i in range(num_assets):
+        for j in range(num_assets):
+            if i != j:
+                correlation_matrix[i, j] = spearman_correlation(aligned_assets[i], aligned_assets[j])
+            else:
+                correlation_matrix[i, j] = 1.0  # Self-correlation is always 1
+
+    return correlation_matrix
+    
 if __name__ == "__main__":
 
     ## Load Data and Filter for issues
@@ -233,5 +278,6 @@ if __name__ == "__main__":
     print(f"number transition matrixes {len(results)}")
 
     # Corralation total assets
-    correlation_matrix = tm.generate_asset_correlation_matrix(filtered_results)
+    correlation_matrix = calculate_asset_correlation(filtered_results)
+    print(correlation_matrix.shape)
     tm.plot_transition_matrix_heatmap(correlation_matrix)
