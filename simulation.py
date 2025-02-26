@@ -120,21 +120,23 @@ class TransitionMatrixces():
     
     def probabalistic_next_state(self, current_state, transition_matrix):
         # Get the row corresponding to the current state (adjust for zero-indexing)
-        probabilities = transition_matrix[current_state - 1]
-        total = probabilities.sum()
+        probabilities = transition_matrix[current_state - 1].copy()
+
+        # Remove any negative values (set them to zero)
+        probabilities = np.clip(probabilities, 0, None)
         
-        # Check if total is not close to 1 and normalize if needed
-        if not np.isclose(total, 1.0):
-            if total == 0:
-                # Option 1: Choose uniformly if there are no transitions,
-                # or you could raise an error
-                probabilities = np.full_like(probabilities, 1.0 / len(probabilities))
-            else:
-                probabilities = probabilities / total
+        # Normalize probabilities so they sum to 1
+        total = probabilities.sum()
+        if total == 0:
+            # If the row sums to zero (no transitions), assign a uniform distribution
+            probabilities = np.full_like(probabilities, 1.0 / len(probabilities))
+        else:
+            probabilities /= total
 
         states = np.arange(1, self.num_buckets + 1)  # 1-indexed states
         next_state = np.random.choice(states, p=probabilities)
         return next_state
+
         
     def plot_value_distribution(self, array):
         """
@@ -201,6 +203,7 @@ def filter_data(array):
     
 
 def simulation(iteration, transition_matrix):
+    start_cash = 10_000_000
     simulation_steps = 1_000
     num_buckets=20
     tm = TransitionMatrixces(num_buckets)
@@ -228,9 +231,9 @@ def simulation(iteration, transition_matrix):
 
         print(varince)
 
-        plt.plot(arr_values)
-        plt.title(symbol)
-        plt.show()
+        #plt.plot(arr_values)
+        #plt.title(symbol)
+        #plt.show()
 
         idx_symbol[i] = {
                 'Matrix' : matrix,
@@ -241,8 +244,21 @@ def simulation(iteration, transition_matrix):
             }
 
         i += 1
+        
+    num_assets = len(idx_symbol)
 
+    arr_temp = np.random.random((num_assets, 1))
+    arr_ratios = arr_temp / arr_temp.sum(axis=0, keepdims=True)
+        
+    print(arr_ratios)
+    print(np.sum(arr_ratios))
     
+    i = 0
+    for item in idx_symbol.items():
+        
+        
+        
+        i += 1
 
 if __name__ == "__main__":
 
