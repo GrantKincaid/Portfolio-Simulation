@@ -205,6 +205,7 @@ def filter_data(array):
 def simulation(iteration, transition_matrix):
     start_cash = 10_000_000
     simulation_steps = 1_000
+    RFR = 0.0433
     num_buckets=20
     tm = TransitionMatrixces(num_buckets)
 
@@ -236,7 +237,7 @@ def simulation(iteration, transition_matrix):
         #plt.show()
 
         idx_symbol[i] = {
-                'Matrix' : matrix,
+                'matrix' : matrix,
                 'prices' : arr_values,
                 'symbol' : symbol,
                 'avg_slopes' : avg_slopes,
@@ -253,13 +254,19 @@ def simulation(iteration, transition_matrix):
     print(arr_ratios)
     print(np.sum(arr_ratios))
     
-    i = 0
-    for item in idx_symbol.items():
+    cumlative_performace = None
+    for i in range(len(idx_symbol)):
+        idx_symbol[i]['ratio'] = arr_ratios[i]
         
-        
-        
-        i += 1
-
+        if i == 0:
+            cumlative_performace = idx_symbol[i]['prices'] * idx_symbol[i]['ratio']
+        else:
+            cumlative_performace += idx_symbol[i]['prices'] * idx_symbol[i]['ratio']
+            
+    plt.plot(cumlative_performace)
+    plt.show()
+    
+    
 if __name__ == "__main__":
 
     ## Load Data and Filter for issues
@@ -296,6 +303,8 @@ if __name__ == "__main__":
     # ----------- SIMULATION ---------------
 
     count = [i for i in range(10)]
+    #clip data for testing
+    matrix_results = matrix_results[0:50]
 
     iterable_matrix_results = itertools.product(count, [matrix_results])
 
