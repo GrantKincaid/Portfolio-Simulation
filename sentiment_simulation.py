@@ -250,6 +250,21 @@ def simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes, sentime
         last_state = c_state
     return arr_values
 
+@njit
+def simulate_states_only(simulation_steps, num_buckets, matrix, N, avg_slopes, sentiment_array, sentiment_weight, sentiment_range):
+    arr_values = np.empty(simulation_steps, dtype=np.float32)
+    # Initialize first step separately using the sentiment from step 0.
+    init_state = np.random.randint(0, num_buckets)
+    c_state = probabilistic_next_state_numba(num_buckets, init_state, matrix, sentiment_array[0], sentiment_weight, sentiment_range)
+    arr_values[0] = avg_slopes[c_state] + N
+    last_state = c_state
+
+    # For subsequent steps, use the corresponding sentiment for each step.
+    for j in range(1, simulation_steps):
+        c_state = probabilistic_next_state_numba(num_buckets, last_state, matrix, sentiment_array[j], sentiment_weight, sentiment_range)
+        arr_values[j] = avg_slopes[c_state] + arr_values[j - 1]
+        last_state = c_state
+    return arr_values
 
 def random_sentiment_basic(num_buckets, steps):
     sentiment = np.zeros((steps), dtype=np.int8)
@@ -290,7 +305,7 @@ def random_sentiment(num_buckets, steps):
     return sentiment
 
 
-def simulation(iteration, transition_matrix):
+def simulation(iteration, transition_matrix, matrix_spx):
     simulation_steps = 365 * 5  # Five years
     num_buckets = 20
 
@@ -383,13 +398,18 @@ if __name__ == "__main__":
 
     print(f"number transition matrixes {len(matrix_results)}")
 
+    # index generation
+    path_spx = os.path.join(app_dir, 'spx.csv')
+    df_spx = pd.read_csv(path_spx, usecols=['Open', 'Close'])
+    matrix_spx = tm.generate_transition_matrix([df_spx.values, path_spx])
+
     # ----------- SIMULATION --------------- #
 
     count = [i for i in range(10_000)]
     #clip data for testing
     #matrix_results = matrix_results[0:50]
 
-    iterable_matrix_results = itertools.product(count, [matrix_results])
+    iterable_matrix_results = itertools.product(count, [matrix_results], [matrix_spx])
 
     with mp.Pool() as pool:
         sim_results = pool.starmap(simulation, iterable_matrix_results)

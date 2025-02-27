@@ -24,5 +24,11 @@ def data_collector():
             print(f"collected {symbol} {i}")
             time.sleep(2) # Dont spam the API
 
+def index_collector():
+    ticker = yf.Ticker('^SPX')
+    history = ticker.history(period='30y')
+    history.to_csv('spx.csv')
+
 if __name__ == "__main__":
-    data_collector()
+    #data_collector()
+    index_collector()
