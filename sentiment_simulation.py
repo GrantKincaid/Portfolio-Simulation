@@ -199,13 +199,20 @@ def filter_data(array):
     
 
 @njit
-def probabilistic_next_state_numba(num_buckets, current_state, matrix):
+def probabilistic_next_state_numba(num_buckets, current_state, matrix, sentiment, sentiment_weight, sentiment_range):
     # Get the row for current_state (0-indexed)
     row = matrix[current_state]
-    # Replace negatives with 0 quickly
     p = np.empty_like(row)
     for i in range(len(row)):
-        p[i] = row[i] if row[i] > 0 else 0.0
+        # Use non-negative probability from the matrix
+        original = row[i] if row[i] > 0.0 else 0.0
+        # Compute a Gaussian bias centered at the current sentiment value.
+        # Buckets close to 'sentiment' get a boost.
+        diff = i - sentiment
+        bias = np.exp(- (diff * diff) / (2.0 * sentiment_range * sentiment_range))
+        p[i] = original + sentiment_weight * bias
+
+    # Sum the combined weights
     total = 0.0
     for i in range(len(p)):
         total += p[i]
@@ -213,13 +220,13 @@ def probabilistic_next_state_numba(num_buckets, current_state, matrix):
     if total == 0.0:
         return np.random.randint(0, num_buckets)
     
-    # Normalize in place and compute CDF
+    # Normalize and compute CDF
     cdf = np.empty_like(p)
     s = 0.0
     for i in range(len(p)):
         s += p[i] / total
         cdf[i] = s
-    # Draw a random number and select next state using linear search
+    # Draw a random number and select next state
     r = np.random.rand()
     for i in range(len(cdf)):
         if r < cdf[i]:
@@ -228,22 +235,23 @@ def probabilistic_next_state_numba(num_buckets, current_state, matrix):
 
 
 @njit
-def simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes):
+def simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes, sentiment_array, sentiment_weight, sentiment_range):
     arr_values = np.empty(simulation_steps, dtype=np.float32)
-    # Initialize first step separately
+    # Initialize first step separately using the sentiment from step 0.
     init_state = np.random.randint(0, num_buckets)
-    c_state = probabilistic_next_state_numba(num_buckets, init_state, matrix)
+    c_state = probabilistic_next_state_numba(num_buckets, init_state, matrix, sentiment_array[0], sentiment_weight, sentiment_range)
     arr_values[0] = avg_slopes[c_state] + N
     last_state = c_state
 
-    # For subsequent steps, use the previous state
+    # For subsequent steps, use the corresponding sentiment for each step.
     for j in range(1, simulation_steps):
-        c_state = probabilistic_next_state_numba(num_buckets, last_state, matrix)
+        c_state = probabilistic_next_state_numba(num_buckets, last_state, matrix, sentiment_array[j], sentiment_weight, sentiment_range)
         arr_values[j] = avg_slopes[c_state] + arr_values[j - 1]
         last_state = c_state
     return arr_values
 
-def random_sentiment(num_buckets, steps):
+
+def random_sentiment_basic(num_buckets, steps):
     sentiment = np.zeros((steps), dtype=np.int8)
     last_sentiment =  round(num_buckets / 2, 0)
     quarter_buckets = round(num_buckets / 4, 0)
@@ -252,17 +260,52 @@ def random_sentiment(num_buckets, steps):
         sentiment[i] = last_sentiment
     return sentiment
 
+
+def random_sentiment(num_buckets, steps):
+    sentiment = np.empty(steps, dtype=np.int8)
+    last_sentiment = num_buckets // 2  # Start in the middle of the bucket range.
+    
+    for i in range(steps):
+        # Calculate a step standard deviation that is larger when the sentiment is low.
+        # When last_sentiment is low, (num_buckets - last_sentiment) is high, leading to larger steps.
+        step_std = 1.0 + (num_buckets - last_sentiment) / num_buckets * 1.5  # Adjust multiplier as needed
+
+        extream_std = 20.0
+        if last_sentiment == num_buckets: # Extream State Means Extream Volatility
+            step_std = extream_std
+        
+        # A small positive drift encourages moves toward higher bucket values.
+        drift = 0.0
+        
+        # Sample a step from a normal distribution and round to an integer.
+        change = int(round(np.random.normal(loc=drift, scale=step_std)))
+        
+        # Update sentiment and ensure it stays within the valid range.
+        new_sentiment = last_sentiment + change
+        new_sentiment = max(0, min(new_sentiment, num_buckets - 1))
+        
+        sentiment[i] = new_sentiment
+        last_sentiment = new_sentiment
+        
+    return sentiment
+
+
 def simulation(iteration, transition_matrix):
     simulation_steps = 365 * 5  # Five years
     num_buckets = 20
 
     results = []  # Will hold simulation outputs for each asset
 
+    # Create a sentiment trend for the simulation steps.
     sentiment = random_sentiment(num_buckets, simulation_steps)
+    # Parameters to control the sentiment bias:
+    sentiment_weight = 2.5    # Increase to strengthen sentiment influence.
+    sentiment_range  = 20.0    # Sentiment boost will affect buckets within ~2 steps.
 
-    # Simulate each asset
+    # Simulate each asset, now using the sentiment trend.
     for matrix, N, symbol, avg_slopes in transition_matrix:
-        arr_values = simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes)
+        arr_values = simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes,
+                                    sentiment, sentiment_weight, sentiment_range)
         variance = np.var(arr_values)
         # Skip assets with invalid variance
         if np.isnan(variance) or np.isinf(variance):
@@ -292,13 +335,22 @@ def simulation(iteration, transition_matrix):
     for i in range(num_assets):
         results[i]['ratio'] = arr_ratios[i]
         # Zero-base the performance accumulation
-        cumulative_performance += results[i]['prices']  #* arr_ratios[i]
+        cumulative_performance += results[i]['prices'] * arr_ratios[i]
     
     return results, cumulative_performance
 
     
-
 def analysis():
+
+    # Sharp ratio
+        # max
+        # efficency frontier graph
+
+    # Var
+    # Cvar
+
+    # 3D Distribution by month
+
     pass
 
 
@@ -333,9 +385,9 @@ if __name__ == "__main__":
 
     # ----------- SIMULATION --------------- #
 
-    count = [i for i in range(50)]
+    count = [i for i in range(10_000)]
     #clip data for testing
-    matrix_results = matrix_results[0:50]
+    #matrix_results = matrix_results[0:50]
 
     iterable_matrix_results = itertools.product(count, [matrix_results])
 
