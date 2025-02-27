@@ -199,7 +199,7 @@ def filter_data(array):
     
 
 @njit
-def probabilistic_next_state_numba(num_buckets, current_state, matrix, sentiment, sentiment_weight, sentiment_range):
+def probabilistic_weighted_next_state_numba(num_buckets, current_state, matrix, sentiment, sentiment_weight, sentiment_range):
     # Get the row for current_state (0-indexed)
     row = matrix[current_state]
     p = np.empty_like(row)
@@ -233,36 +233,63 @@ def probabilistic_next_state_numba(num_buckets, current_state, matrix, sentiment
             return i
     return num_buckets - 1  # fallback
 
+@njit
+def probabilistic_next_state_numba(num_buckets, current_state, matrix):
+    # Get the row for current_state (0-indexed)
+    row = matrix[current_state]
+    # Replace negatives with 0 quickly
+    p = np.empty_like(row)
+    for i in range(len(row)):
+        p[i] = row[i] if row[i] > 0 else 0.0
+    total = 0.0
+    for i in range(len(p)):
+        total += p[i]
+    # If no valid transitions, choose uniformly at random
+    if total == 0.0:
+        return np.random.randint(0, num_buckets)
+    
+    # Normalize in place and compute CDF
+    cdf = np.empty_like(p)
+    s = 0.0
+    for i in range(len(p)):
+        s += p[i] / total
+        cdf[i] = s
+    # Draw a random number and select next state using linear search
+    r = np.random.rand()
+    for i in range(len(cdf)):
+        if r < cdf[i]:
+            return i
+    return num_buckets - 1  # fallback
 
 @njit
 def simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes, sentiment_array, sentiment_weight, sentiment_range):
     arr_values = np.empty(simulation_steps, dtype=np.float32)
     # Initialize first step separately using the sentiment from step 0.
     init_state = np.random.randint(0, num_buckets)
-    c_state = probabilistic_next_state_numba(num_buckets, init_state, matrix, sentiment_array[0], sentiment_weight, sentiment_range)
+    c_state = probabilistic_weighted_next_state_numba(num_buckets, init_state, matrix, sentiment_array[0], sentiment_weight, sentiment_range)
     arr_values[0] = avg_slopes[c_state] + N
     last_state = c_state
 
     # For subsequent steps, use the corresponding sentiment for each step.
     for j in range(1, simulation_steps):
-        c_state = probabilistic_next_state_numba(num_buckets, last_state, matrix, sentiment_array[j], sentiment_weight, sentiment_range)
+        c_state = probabilistic_weighted_next_state_numba(num_buckets, last_state, matrix, sentiment_array[j], sentiment_weight, sentiment_range)
         arr_values[j] = avg_slopes[c_state] + arr_values[j - 1]
         last_state = c_state
     return arr_values
 
 @njit
 def simulate_states_only(simulation_steps, num_buckets, matrix, N, avg_slopes, sentiment_array, sentiment_weight, sentiment_range):
-    arr_values = np.empty(simulation_steps, dtype=np.float32)
+    arr_values = np.empty(simulation_steps, dtype=np.int8)
     # Initialize first step separately using the sentiment from step 0.
     init_state = np.random.randint(0, num_buckets)
     c_state = probabilistic_next_state_numba(num_buckets, init_state, matrix, sentiment_array[0], sentiment_weight, sentiment_range)
-    arr_values[0] = avg_slopes[c_state] + N
+    arr_values[0] = c_state
     last_state = c_state
 
     # For subsequent steps, use the corresponding sentiment for each step.
     for j in range(1, simulation_steps):
         c_state = probabilistic_next_state_numba(num_buckets, last_state, matrix, sentiment_array[j], sentiment_weight, sentiment_range)
-        arr_values[j] = avg_slopes[c_state] + arr_values[j - 1]
+        arr_values[j] = c_state
         last_state = c_state
     return arr_values
 
@@ -407,7 +434,7 @@ if __name__ == "__main__":
 
     count = [i for i in range(10_000)]
     #clip data for testing
-    #matrix_results = matrix_results[0:50]
+    matrix_results = matrix_results[0:50]
 
     iterable_matrix_results = itertools.product(count, [matrix_results], [matrix_spx])
 
