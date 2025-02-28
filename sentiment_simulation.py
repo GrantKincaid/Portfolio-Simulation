@@ -7,6 +7,9 @@ import seaborn as sns
 import multiprocessing as mp
 import itertools
 from numba import njit
+import pickle
+import gc
+import time
 
 class TransitionMatrixces():
     def __init__(self, num_buckets):
@@ -278,17 +281,17 @@ def simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes, sentime
     return arr_values
 
 @njit
-def simulate_states_only(simulation_steps, num_buckets, matrix, N, avg_slopes, sentiment_array, sentiment_weight, sentiment_range):
+def simulate_states_only(simulation_steps, num_buckets, matrix):
     arr_values = np.empty(simulation_steps, dtype=np.int8)
     # Initialize first step separately using the sentiment from step 0.
     init_state = np.random.randint(0, num_buckets)
-    c_state = probabilistic_next_state_numba(num_buckets, init_state, matrix, sentiment_array[0], sentiment_weight, sentiment_range)
+    c_state = probabilistic_next_state_numba(num_buckets, init_state, matrix)
     arr_values[0] = c_state
     last_state = c_state
 
     # For subsequent steps, use the corresponding sentiment for each step.
     for j in range(1, simulation_steps):
-        c_state = probabilistic_next_state_numba(num_buckets, last_state, matrix, sentiment_array[j], sentiment_weight, sentiment_range)
+        c_state = probabilistic_next_state_numba(num_buckets, last_state, matrix)
         arr_values[j] = c_state
         last_state = c_state
     return arr_values
@@ -331,6 +334,15 @@ def random_sentiment(num_buckets, steps):
         
     return sentiment
 
+@njit
+def pearson_correlation(x, y):
+    x_mean = np.mean(x)
+    y_mean = np.mean(y)
+    xm = x - x_mean
+    ym = y - y_mean
+    numerator = np.dot(xm, ym)
+    denominator = np.sqrt(np.dot(xm, xm) * np.dot(ym, ym))
+    return numerator / denominator
 
 def simulation(iteration, transition_matrix, matrix_spx):
     simulation_steps = 365 * 5  # Five years
@@ -339,15 +351,32 @@ def simulation(iteration, transition_matrix, matrix_spx):
     results = []  # Will hold simulation outputs for each asset
 
     # Create a sentiment trend for the simulation steps.
-    sentiment = random_sentiment(num_buckets, simulation_steps)
+    #sentiment = random_sentiment(num_buckets, simulation_steps) # random distribuiotn based market
+    matrix_spx = matrix_spx[0]
+    sentiment = simulate_states_only(simulation_steps, num_buckets, matrix_spx) # random spx based market
     # Parameters to control the sentiment bias:
-    sentiment_weight = 2.5    # Increase to strengthen sentiment influence.
+    sentiment_weight = 5   # Increase to strengthen sentiment influence.
     sentiment_range  = 20.0    # Sentiment boost will affect buckets within ~2 steps.
 
+    spx_flat = matrix_spx.flatten()
     # Simulate each asset, now using the sentiment trend.
     for matrix, N, symbol, avg_slopes in transition_matrix:
+        if not np.all(np.isfinite(matrix)):
+            continue # Some matrixes have erros whcih will break the code
+
+        # Standard deviation of differences
+        diff = matrix_spx - matrix
+        diff_vector = diff.flatten()
+        std_diff = np.std(diff_vector)  # Plus one so probabilty is never absolutly fixed to broad market
+
+        # Correltation stength
+        matrix_flat = matrix.flatten()
+        r = pearson_correlation(spx_flat, matrix_flat)
+        strength_r_squared = r**2
+
+        # Simulate
         arr_values = simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes,
-                                    sentiment, sentiment_weight, sentiment_range)
+                                    sentiment, strength_r_squared, std_diff)
         variance = np.var(arr_values)
         # Skip assets with invalid variance
         if np.isnan(variance) or np.isinf(variance):
@@ -378,6 +407,12 @@ def simulation(iteration, transition_matrix, matrix_spx):
         results[i]['ratio'] = arr_ratios[i]
         # Zero-base the performance accumulation
         cumulative_performance += results[i]['prices'] * arr_ratios[i]
+
+        # Memory clean up
+        del results[i]['matrix']
+        del results[i]['prices']
+        del results[i]['avg_slopes']
+        del results[i]['N']
     
     return results, cumulative_performance
 
@@ -432,16 +467,21 @@ if __name__ == "__main__":
 
     # ----------- SIMULATION --------------- #
 
-    count = [i for i in range(10_000)]
+    count = [i for i in range(1_000)]
     #clip data for testing
-    matrix_results = matrix_results[0:50]
+    #matrix_results = matrix_results[0:50]
 
-    iterable_matrix_results = itertools.product(count, [matrix_results], [matrix_spx])
+    for i in range(0, 1_000):
 
-    with mp.Pool() as pool:
-        sim_results = pool.starmap(simulation, iterable_matrix_results)
+        iterable_matrix_results = itertools.product(count, [matrix_results], [matrix_spx]) # Must be inside loop
 
-    for idx_symbol, performance in sim_results:
-        plt.plot(performance)
+        with mp.Pool(processes=20) as pool:
+            sim_results = pool.starmap(simulation, iterable_matrix_results)
 
-    plt.show()
+        with open(os.path.join(app_dir, 'Simulations', f'{time.time()}.pkl'), 'wb') as file:
+            pickle.dump(sim_results, file)
+
+        del sim_results
+        gc.collect()
+
+        print('Pass complete:', i)
