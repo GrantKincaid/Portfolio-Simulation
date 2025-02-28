@@ -10,6 +10,7 @@ from numba import njit
 import pickle
 import gc
 import time
+import cupy as cp
 
 class TransitionMatrixces():
     def __init__(self, num_buckets):
@@ -409,6 +410,60 @@ def simulate_sharpe(prices, n_iter, risk_free_rate, annualization_factor):
     
     return sharpe_arr, ratios_arr
 
+def simulate_sharpe_cupy(prices, n_iter, risk_free_rate, annualization_factor):
+    """
+    Compute simulated Sharpe ratios and corresponding asset ratios using CuPy.
+    
+    Parameters:
+      prices              : cp.ndarray of shape (num_assets, simulation_steps)
+      n_iter              : Number of simulation iterations
+      risk_free_rate      : The risk free rate (scalar)
+      annualization_factor: Annualization factor for Sharpe ratio (scalar)
+    
+    Returns:
+      sharpe: cp.ndarray of shape (n_iter,) containing Sharpe ratios
+      ratios_arr: cp.ndarray of shape (n_iter, num_assets) with asset weights used per simulation
+    """
+    num_assets, simulation_steps = prices.shape
+
+    # Generate random ratios for all simulations at once.
+    # This produces an array of shape (n_iter, num_assets) with values in [0,1).
+    ratios = cp.random.rand(n_iter, num_assets, dtype=cp.float32)
+
+    # Sum each row to get total weight per simulation iteration.
+    totals = cp.sum(ratios, axis=1, keepdims=True)
+    
+    # If any total is extremely small (unlikely with random [0,1) draws),
+    # replace the corresponding row with a uniform distribution.
+    mask = totals < 1e-8
+    # For rows where totals are too small, set all entries to 1/num_assets.
+    ratios = cp.where(mask, cp.full_like(ratios, 1.0/num_assets), ratios / totals)
+    
+    # Save the ratios for output.
+    ratios_arr = ratios.copy()
+
+    # Compute cumulative performance for each simulation iteration.
+    # Each simulation's performance is the weighted sum of asset prices:
+    #   (n_iter, num_assets) dot (num_assets, simulation_steps) -> (n_iter, simulation_steps)
+    cumulative_performance = cp.matmul(ratios, prices)
+
+    # Calculate daily returns.
+    # For each simulation, compute returns from t to t+1.
+    # Avoid division by zero by setting return to 0 where the previous value is zero.
+    prev_cp = cumulative_performance[:, :-1]
+    next_cp = cumulative_performance[:, 1:]
+    daily_returns = cp.where(prev_cp != 0, next_cp / prev_cp - 1.0, 0.0)
+
+    # Compute the mean and standard deviation of daily returns for each simulation.
+    mean_daily = cp.mean(daily_returns, axis=1)
+    std_daily = cp.std(daily_returns, axis=1)
+    
+    # Compute Sharpe ratio, with a guard against division by zero.
+    sharpe = cp.where(std_daily < 1e-8, 0.0,
+                      ((mean_daily - risk_free_rate) / std_daily) * annualization_factor)
+    
+    return sharpe, ratios_arr
+
 def simulation(iteration, transition_matrix, matrix_spx):
     simulation_steps = 365 * 5  # Five years
     num_buckets = 20
@@ -466,19 +521,24 @@ def simulation(iteration, transition_matrix, matrix_spx):
         prices[i] += results[i]['prices']
 
     # Run the simulation to get Sharpe ratios.
-    n_iter = 2_000           # Number of simulation iterations.
+    n_iter = 10_000           # Number of simulation iterations.
     risk_free_rate_daily = (1 + 0.043) ** (1/252) - 1
-    annualization_factor = np.sqrt(252)
-    sharpe_results, ratios_results = simulate_sharpe(prices, n_iter, risk_free_rate_daily, annualization_factor)
+    annualization_factor = np.sqrt(252).item()
+    cp_prices = cp.asarray(prices)
+    sharpe_results, ratios_results = simulate_sharpe_cupy(cp_prices, n_iter, risk_free_rate_daily, annualization_factor)
+    
+    # Convert each CuPy array to a NumPy array
+    sharpe_np = cp.asnumpy(sharpe_results)
+    ratios_np = cp.asnumpy(ratios_results)
 
     # Randomly select with a 50/50 chance either the best or worst Sharpe ratio outcome.
     if np.random.rand() < 0.5:
-        chosen_index = np.argmax(sharpe_results)
+        chosen_index = np.argmax(sharpe_np)
     else:
-        chosen_index = np.argmin(sharpe_results)
+        chosen_index = np.argmin(sharpe_np)
 
-    chosen_sharpe = sharpe_results[chosen_index]
-    chosen_ratios = ratios_results[chosen_index]
+    chosen_sharpe = sharpe_np[chosen_index]
+    chosen_ratios = ratios_np[chosen_index]
 
     cumulative_performance = np.zeros(simulation_steps, dtype=np.float32)
     for i in range(num_assets):
