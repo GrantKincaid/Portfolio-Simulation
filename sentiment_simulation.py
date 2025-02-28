@@ -201,7 +201,7 @@ def filter_data(array):
         return False
     
 
-@njit
+@njit(fastmath=True, cache=True)
 def probabilistic_weighted_next_state_numba(num_buckets, current_state, matrix, sentiment, sentiment_weight, sentiment_range):
     # Get the row for current_state (0-indexed)
     row = matrix[current_state]
@@ -236,7 +236,7 @@ def probabilistic_weighted_next_state_numba(num_buckets, current_state, matrix, 
             return i
     return num_buckets - 1  # fallback
 
-@njit
+@njit(fastmath=True, cache=True)
 def probabilistic_next_state_numba(num_buckets, current_state, matrix):
     # Get the row for current_state (0-indexed)
     row = matrix[current_state]
@@ -264,7 +264,7 @@ def probabilistic_next_state_numba(num_buckets, current_state, matrix):
             return i
     return num_buckets - 1  # fallback
 
-@njit
+@njit(fastmath=True, cache=True)
 def simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes, sentiment_array, sentiment_weight, sentiment_range):
     arr_values = np.empty(simulation_steps, dtype=np.float32)
     # Initialize first step separately using the sentiment from step 0.
@@ -280,7 +280,7 @@ def simulate_asset(simulation_steps, num_buckets, matrix, N, avg_slopes, sentime
         last_state = c_state
     return arr_values
 
-@njit
+@njit(fastmath=True, cache=True)
 def simulate_states_only(simulation_steps, num_buckets, matrix):
     arr_values = np.empty(simulation_steps, dtype=np.int8)
     # Initialize first step separately using the sentiment from step 0.
@@ -334,7 +334,7 @@ def random_sentiment(num_buckets, steps):
         
     return sentiment
 
-@njit
+@njit(fastmath=True, cache=True)
 def pearson_correlation(x, y):
     x_mean = np.mean(x)
     y_mean = np.mean(y)
@@ -343,6 +343,71 @@ def pearson_correlation(x, y):
     numerator = np.dot(xm, ym)
     denominator = np.sqrt(np.dot(xm, xm) * np.dot(ym, ym))
     return numerator / denominator
+
+@njit(fastmath=True, cache=True)
+def simulate_sharpe(prices, n_iter, risk_free_rate, annualization_factor):
+    num_assets, simulation_steps = prices.shape
+    sharpe_arr = np.empty(n_iter, dtype=np.float32)
+    ratios_arr = np.empty((n_iter, num_assets), dtype=np.float32)
+    
+    # Loop through simulation iterations
+    for sim in range(n_iter):
+        # Generate random asset ratios and normalize them.
+        ratios = np.empty(num_assets, dtype=np.float32)
+        total = 0.0
+        for a in range(num_assets):
+            ratios[a] = np.random.random()  # random number between 0 and 1
+            total += ratios[a]
+        # Avoid division by zero when normalizing ratios.
+        if total < 1e-8:
+            for a in range(num_assets):
+                ratios[a] = 1.0 / num_assets
+        else:
+            for a in range(num_assets):
+                ratios[a] /= total
+        
+        # Save the ratios for this simulation.
+        for a in range(num_assets):
+            ratios_arr[sim, a] = ratios[a]
+        
+        # Compute cumulative performance: weighted sum of asset prices.
+        cumulative_performance = np.empty(simulation_steps, dtype=np.float32)
+        for t in range(simulation_steps):
+            cumul = 0.0
+            for a in range(num_assets):
+                cumul += prices[a, t] * ratios[a]
+            cumulative_performance[t] = cumul
+        
+        # Convert cumulative performance into daily relative returns.
+        daily_returns = np.empty(simulation_steps - 1, dtype=np.float32)
+        for t in range(simulation_steps - 1):
+            if cumulative_performance[t] != 0.0:
+                daily_returns[t] = cumulative_performance[t + 1] / cumulative_performance[t] - 1.0
+            else:
+                daily_returns[t] = 0.0  # fallback if previous value is zero
+        
+        # Calculate mean daily return.
+        mean_daily = 0.0
+        for t in range(daily_returns.shape[0]):
+            mean_daily += daily_returns[t]
+        mean_daily /= daily_returns.shape[0]
+        
+        # Calculate standard deviation of daily returns.
+        sum_sq = 0.0
+        for t in range(daily_returns.shape[0]):
+            diff = daily_returns[t] - mean_daily
+            sum_sq += diff * diff
+        std_daily = np.sqrt(sum_sq / daily_returns.shape[0])
+        
+        # Calculate Sharpe ratio (avoid division by zero).
+        if std_daily < 1e-8:
+            sharpe = 0.0
+        else:
+            sharpe = ((mean_daily - risk_free_rate) / std_daily) * annualization_factor
+        
+        sharpe_arr[sim] = sharpe
+    
+    return sharpe_arr, ratios_arr
 
 def simulation(iteration, transition_matrix, matrix_spx):
     simulation_steps = 365 * 5  # Five years
@@ -390,32 +455,43 @@ def simulation(iteration, transition_matrix, matrix_spx):
             'N': N
         })
 
-        #plt.plot(arr_values)
-        #plt.show()
-
     num_assets = len(results)
     if num_assets == 0:
         return results, None
 
-    # Generate asset ratios and normalize them (vectorized)
-    arr_ratios = np.random.random(num_assets)
-    arr_ratios /= arr_ratios.sum()
-
     # Compute cumulative performance in a vectorized way
+    prices = np.zeros((num_assets, simulation_steps), dtype=np.float32)
+    for i in range(num_assets):
+        # Zero-base the performance accumulation
+        prices[i] += results[i]['prices']
+
+    # Run the simulation to get Sharpe ratios.
+    n_iter = 2_000           # Number of simulation iterations.
+    risk_free_rate_daily = (1 + 0.043) ** (1/252) - 1
+    annualization_factor = np.sqrt(252)
+    sharpe_results, ratios_results = simulate_sharpe(prices, n_iter, risk_free_rate_daily, annualization_factor)
+
+    # Randomly select with a 50/50 chance either the best or worst Sharpe ratio outcome.
+    if np.random.rand() < 0.5:
+        chosen_index = np.argmax(sharpe_results)
+    else:
+        chosen_index = np.argmin(sharpe_results)
+
+    chosen_sharpe = sharpe_results[chosen_index]
+    chosen_ratios = ratios_results[chosen_index]
+
     cumulative_performance = np.zeros(simulation_steps, dtype=np.float32)
     for i in range(num_assets):
-        results[i]['ratio'] = arr_ratios[i]
-        # Zero-base the performance accumulation
-        cumulative_performance += results[i]['prices'] * arr_ratios[i]
+        results[i]['ratio'] = chosen_ratios[i]
+        cumulative_performance += results[i]['prices'] * chosen_ratios[i]
 
         # Memory clean up
         del results[i]['matrix']
         del results[i]['prices']
         del results[i]['avg_slopes']
         del results[i]['N']
-    
-    return results, cumulative_performance
 
+    return results, cumulative_performance
 
 if __name__ == "__main__":
 
@@ -463,6 +539,11 @@ if __name__ == "__main__":
 
         with mp.Pool(processes=20) as pool:
             sim_results = pool.starmap(simulation, iterable_matrix_results)
+
+        #for symbol, arr in sim_results:
+            #plt.plot(arr)
+
+        #plt.show()
 
         with open(os.path.join(app_dir, 'Simulations', f'{time.time()}.pkl'), 'wb') as file:
             pickle.dump(sim_results, file)
