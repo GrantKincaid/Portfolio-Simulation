@@ -416,20 +416,6 @@ def simulation(iteration, transition_matrix, matrix_spx):
     
     return results, cumulative_performance
 
-    
-def analysis():
-
-    # Sharp ratio
-        # max
-        # efficency frontier graph
-
-    # Var
-    # Cvar
-
-    # 3D Distribution by month
-
-    pass
-
 
 if __name__ == "__main__":
 
